@@ -2,7 +2,7 @@
 Discovery script for TCG sealed product data — multi-game ready.
 
 Purpose: fetch a product by name from any configured game's source,
-then parse it into clean fields: release date, image, contents.
+then parse it into a standard product record (see common.py).
 
 Each entry in GAME_SOURCES is a confirmed, working data source found
 via browser DevTools (see project notes). Only add a game here once
@@ -17,16 +17,14 @@ import sys
 import re
 import requests
 from bs4 import BeautifulSoup
+from common import make_product_record, print_product_record
 
-# Confirmed working sources go here. Add a new game only after
-# confirming its endpoint via DevTools, the same way we found this one.
 GAME_SOURCES = {
     "fab": {
         "name": "Flesh and Blood",
         "search_url": "https://fabtcg.com/api/wp/v2/product",
         "search_param": "search",
     },
-    # "riftbound": { ... }  <- add once confirmed
 }
 
 
@@ -55,11 +53,10 @@ def fetch_product(game_key, search_term):
     if not results:
         print(f"No results found for '{search_term}' in {source['name']}")
         return None
-    return results[0]  # take the first match
+    return results[0]
 
 
 def extract_release_date(html_content):
-    """Find 'Release date: <text>' inside the Overview details block."""
     soup = BeautifulSoup(html_content, "html.parser")
     text = soup.get_text(separator=" ", strip=True)
     match = re.search(r"Release date:\s*([A-Za-z]+ \d{1,2},?\s*\d{4})", text)
@@ -67,7 +64,6 @@ def extract_release_date(html_content):
 
 
 def extract_product_image(product_json):
-    """og:image is the simplest reliable image URL in this response."""
     try:
         return product_json["yoast_head_json"]["og_image"][0]["url"]
     except (KeyError, IndexError, TypeError):
@@ -75,8 +71,6 @@ def extract_product_image(product_json):
 
 
 def extract_pack_contents(html_content):
-    """Find the <ul> list right after a 'Pack Configuration' or
-    'Rarity Distribution' heading."""
     soup = BeautifulSoup(html_content, "html.parser")
     contents = []
 
@@ -93,17 +87,22 @@ def extract_pack_contents(html_content):
 def discover(game_key, search_term):
     product = fetch_product(game_key, search_term)
     if not product:
-        return
+        return None
 
     title = product.get("title", {}).get("rendered", "UNKNOWN")
     html_content = product.get("content", {}).get("rendered", "")
 
-    print(f"Product: {title}")
-    print(f"Release date: {extract_release_date(html_content)}")
-    print(f"Image URL: {extract_product_image(product)}")
-    print("Pack contents:")
-    for line in extract_pack_contents(html_content):
-        print(f"  - {line}")
+    record = make_product_record(
+        game=game_key,
+        title=title,
+        sku=product.get("id"),
+        release_date=extract_release_date(html_content),
+        image_url=extract_product_image(product),
+        contents=extract_pack_contents(html_content),
+        source_url=product.get("link"),
+    )
+    print_product_record(record)
+    return record
 
 
 if __name__ == "__main__":
