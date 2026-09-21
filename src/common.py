@@ -8,15 +8,16 @@ the same way regardless of which game the data came from.
 
 
 def make_product_record(
-    game,
-    title,
-    sku,
-    release_date,
-    image_url,
-    contents,
-    price=None,
-    source_url=None,
+    game, title, sku, release_date, image_url, contents,
+    price=None, source_url=None, pack_configuration=None,
 ):
+    return {
+        "game": game, "title": title, "sku": sku,
+        "release_date": release_date, "image_url": image_url,
+        "contents": contents or [], "price": price,
+        "source_url": source_url,
+        "pack_configuration": pack_configuration or [],
+    }
     """Build a standard product record.
 
     Args:
@@ -42,7 +43,6 @@ def make_product_record(
 
 
 def print_product_record(record):
-    """Pretty-print a standard product record the same way for any game."""
     print(f"\n=== [{record['game']}] {record['title']} ===")
     print(f"SKU: {record['sku']}")
     print(f"Release date: {record['release_date']}")
@@ -54,3 +54,7 @@ def print_product_record(record):
             print(f"  - {line}")
     else:
         print("  (none found)")
+    if record.get("pack_configuration"):
+        print("Pack Configuration:")
+        for line in record["pack_configuration"]:
+            print(f"  - {line}")

@@ -9,8 +9,7 @@ via browser DevTools (see project notes). Only add a game here once
 its endpoint has actually been confirmed working — don't guess URLs.
 
 Usage:
-    python src/discovery_fab.py fab "Outsiders"
-    python src/discovery_fab.py fab "High Seas"
+    python src/discovery_fab.py "Outsiders"
 """
 
 import sys
@@ -26,7 +25,6 @@ GAME_SOURCES = {
         "search_param": "search",
     },
 }
-
 
 def fetch_product(game_key, search_term):
     if game_key not in GAME_SOURCES:
@@ -53,14 +51,27 @@ def fetch_product(game_key, search_term):
     if not results:
         print(f"No results found for '{search_term}' in {source['name']}")
         return None
+
+    search_lower = search_term.lower()
+    exact_matches = [r for r in results if r.get("title", {}).get("rendered", "").lower() == search_lower]
+    if exact_matches:
+        return exact_matches[0]
     return results[0]
 
 
 def extract_release_date(html_content):
     soup = BeautifulSoup(html_content, "html.parser")
     text = soup.get_text(separator=" ", strip=True)
-    match = re.search(r"Release date:\s*([A-Za-z]+ \d{1,2},?\s*\d{4})", text)
-    return match.group(1) if match else None
+
+    patterns = [
+        r"Release date:\s*([A-Za-z]+ \d{1,2}(?:st|nd|rd|th)?,?\s*\d{4})",
+        r"In Stores\s*([A-Za-z]+ \d{1,2}(?:st|nd|rd|th)?,?\s*\d{4})",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match:
+            return match.group(1)
+    return None
 
 
 def extract_product_image(product_json):
@@ -84,6 +95,20 @@ def extract_pack_contents(html_content):
     return contents
 
 
+def extract_box_contents(html_content):
+    soup = BeautifulSoup(html_content, "html.parser")
+    text = soup.get_text(separator=" ", strip=True)
+
+    patterns = [
+        r"[Aa] booster display contains (\d+) booster packs",
+        r"Booster Display\s*\((\d+)\s*packs\)",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, text)
+        if match:
+            return [f"{match.group(1)} booster packs per display"]
+    return []
+
 def discover(game_key, search_term):
     product = fetch_product(game_key, search_term)
     if not product:
@@ -92,13 +117,20 @@ def discover(game_key, search_term):
     title = product.get("title", {}).get("rendered", "UNKNOWN")
     html_content = product.get("content", {}).get("rendered", "")
 
+    # debug_text = BeautifulSoup(html_content, "html.parser").get_text(separator=" ", strip=True)
+    # print("\n[DEBUG] Lines mentioning 'pack':")
+    # for sentence in re.split(r"(?<=[.!?])\s+", debug_text):
+    #     if "pack" in sentence.lower():
+    #         print(f"  - {sentence.strip()}")
+
     record = make_product_record(
         game=game_key,
         title=title,
         sku=product.get("id"),
         release_date=extract_release_date(html_content),
         image_url=extract_product_image(product),
-        contents=extract_pack_contents(html_content),
+        contents=extract_box_contents(html_content),
+        pack_configuration=extract_pack_contents(html_content),
         source_url=product.get("link"),
     )
     print_product_record(record)
@@ -106,11 +138,7 @@ def discover(game_key, search_term):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) < 3:
-        print('Usage: python src/discovery_fab.py <game> "<product name>"')
-        print(f"Configured games: {list(GAME_SOURCES.keys())}")
-        sys.exit(1)
-
-    game_arg = sys.argv[1]
-    term_arg = sys.argv[2]
-    discover(game_arg, term_arg)
+    if len(sys.argv) < 2:
+        print('Usage: python src/discovery_fab.py "<product name>"')
+    else:
+        discover("fab", sys.argv[1])

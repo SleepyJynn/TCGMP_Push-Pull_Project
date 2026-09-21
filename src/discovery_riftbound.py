@@ -6,17 +6,19 @@ Confirmed working sources (15 Sep 2026):
     Product page: https://merch.riotgames.com/en-us/product/<slug>/
 
 Usage:
-    python src/discovery_riftbound.py
+    python src/discovery_riftbound.py "Vendetta"
 """
 
 import gzip
 import json
 import re
+import sys
 import requests
 from bs4 import BeautifulSoup
 from common import make_product_record, print_product_record
 
 CATALOG_URL = "https://merch.riotgames.com/productPreviews/en-us.json.gz"
+WIKI_URL = "https://en.wikipedia.org/wiki/Riftbound"
 
 
 def fetch_catalog():
@@ -66,7 +68,28 @@ def extract_riftbound_contents(page_text):
     return result
 
 
-def discover():
+def fetch_wikipedia_html():
+    session = requests.Session()
+    session.headers.update({
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                      "(KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+    })
+    resp = session.get(WIKI_URL, timeout=15)
+    resp.raise_for_status()
+    return resp.text
+
+
+def find_release_date_near_term(html, search_term):
+    for m in re.finditer(re.escape(search_term.lower()), html.lower()):
+        idx = m.start()
+        window = html[idx: idx + 600]
+        date_match = re.search(r"[A-Za-z]+\s+\d{1,2},\s*\d{4}", window)
+        if date_match:
+            return date_match.group(0)
+    return None
+
+
+def discover(search_term):
     data = fetch_catalog()
 
     riftbound_items = {
@@ -75,14 +98,25 @@ def discover():
     }
     booster_items = {
         k: v for k, v in riftbound_items.items()
-        if "booster" in v.get("title", "").lower()
-        or "display" in v.get("title", "").lower()
+        if ("booster" in v.get("title", "").lower() or "display" in v.get("title", "").lower())
+        and search_term.lower() in v.get("title", "").lower()
     }
+
+    if not booster_items:
+        print(f"No booster/display items found matching '{search_term}'")
+        return
+
+    try:
+        wiki_html = fetch_wikipedia_html()
+    except requests.exceptions.RequestException as e:
+        print(f"(Couldn't fetch Wikipedia page: {e})")
+        wiki_html = None
 
     records = []
     for sku, item in booster_items.items():
         slug = item.get("slug")
         contents_lines = []
+        pack_config_lines = []
 
         try:
             page_html = fetch_product_page_html(slug)
@@ -99,17 +133,22 @@ def discover():
                 parsed = extract_riftbound_contents(contents_line)
                 if parsed["packs_per_display"]:
                     contents_lines.append(f"{parsed['packs_per_display']} booster packs per display")
-                contents_lines.extend(parsed["pack_breakdown"])
+                pack_config_lines = parsed["pack_breakdown"]
         except requests.exceptions.RequestException as e:
             print(f"  (couldn't fetch page for {slug}: {e})")
+
+        release_date = None
+        if wiki_html:
+            release_date = find_release_date_near_term(wiki_html, search_term)
 
         record = make_product_record(
             game="riftbound",
             title=item.get("title"),
             sku=sku,
-            release_date=None,  # confirmed unavailable from any source we found
+            release_date=release_date,
             image_url=(item.get("main_image") or {}).get("src"),
             contents=contents_lines,
+            pack_configuration=pack_config_lines,
             price=item.get("price"),
             source_url=f"https://merch.riotgames.com/en-us/product/{slug}/",
         )
@@ -120,4 +159,7 @@ def discover():
 
 
 if __name__ == "__main__":
-    discover()
+    if len(sys.argv) < 2:
+        print('Usage: python discovery_riftbound.py "Set Name"')
+    else:
+        discover(sys.argv[1])
