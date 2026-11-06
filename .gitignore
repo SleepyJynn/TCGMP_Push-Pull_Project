@@ -1,3 +1,7 @@
 venv/
 __pycache__/
 *.pyc
+vanguard_cache.json
+*_output.txt
+*_debug.txt
+*_diag*.txt
