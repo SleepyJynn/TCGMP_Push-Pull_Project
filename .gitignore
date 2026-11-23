@@ -5,3 +5,6 @@ vanguard_cache.json
 *_output.txt
 *_debug.txt
 *_diag*.txt
+
+mtg_cache/
+pkm_cache/
