@@ -30,9 +30,6 @@ and real product-page View Source the user pasted:
     field directly (confirmed to match the same value exposed on the
     product page itself), labelled honestly as a "listed_date" rather than
     a claimed release date, since that's what it actually is.
-    UPDATE 12 Oct 2026: real release dates are now looked up per set and
-    kept in _RELEASE_DATES (with a source link per row); the listing date
-    is only shown for products that table doesn't cover yet.
   - There is NO structured Contents/spec table like One Piece's
     div.detailColStatus dt/dd pairs — only free-text marketing prose, e.g.
     "Each booster display contains 24 booster packs." or "Ready to Play -
@@ -53,6 +50,16 @@ and real product-page View Source the user pasted:
     corrupted the output for sleeves/playmats (leaked raw trailing JSON
     into the Contents field) — caught via a live run and fixed by
     verifying byte-for-byte against the real saved HTML before shipping.
+
+UPDATED 16 Nov 2026 -- release dates:
+  The store's _createdAt (date the item was LISTED on Riot's store) is no
+  longer used as the release date (shown in the notes only). Products sold as
+  part of a set's release (booster displays/packs, sleeved boosters, champion
+  and showdown decks, vaults, Proving Grounds, set box sets) get that set's release date,
+  from the sources in _SET_DATES. Playmats, sleeves, bundles and store
+  exclusives (Arcane Box Set, Lunar Revel bundle) have no published exact
+  release day, so they get no date rather than a guess. Products releasing
+  after today are skipped, and the output is sorted by date.
 
 Usage:
     python src/discovery_riftbound.py all --out=riftbound_output.txt   (every product, into a UTF-8 file)
@@ -89,6 +96,7 @@ _DEBUG = "--debug" in sys.argv
 if _DEBUG:
     sys.argv.remove("--debug")
 
+from datetime import date
 import gzip
 import html as html_lib  # aliased -- "html" is already used as the page-source parameter name throughout this file
 import json
@@ -218,16 +226,9 @@ def extract_description_candidates(html):
                 text = json.loads('"' + val + '"')
             except (json.JSONDecodeError, ValueError):
                 text = val
-        # Line breaks are kept (12 Oct 2026): the Worlds Bundle lists its
-        # items one per line with no punctuation, so collapsing them ran
-        # "...host cities Foiled playmat and matching deckbox Card sleeves"
-        # together. Only the "Features:" list uses them; everything else
-        # works on a flattened copy (see extract_contents).
-        text = re.sub(r"<br\s*/?>|</(?:p|li|div|h\d)>", "\n", text, flags=re.IGNORECASE)
         text = re.sub(r"<[^>]+>", " ", text)
         text = html_lib.unescape(text)  # &amp; / &#x27; / &nbsp; etc.
-        text = re.sub(r"[^\S\n]+", " ", text)
-        text = re.sub(r" *\n[\n ]*", "\n", text).strip()
+        text = re.sub(r"\s+", " ", text).strip()
         if text and text not in candidates:
             candidates.append(text)
     return candidates
@@ -379,66 +380,17 @@ def strip_disclaimer(text):
     return rest, disclaimer
 
 
-_WORD_NUM = {"a": "1", "an": "1", "one": "1", "two": "2", "three": "3", "four": "4", "five": "5",
-             "six": "6", "seven": "7", "eight": "8", "nine": "9", "ten": "10", "twelve": "12"}
+_WORD_NUM = {"a": "1", "an": "1", "one": "1", "two": "2", "three": "3", "four": "4"}
 
 
 def _sentences(text):
     return [s.strip() for s in re.split(r"(?<=[.!?])\s+(?=[A-Z0-9])", text) if s.strip()]
 
 
-# Tidy-up (12 Oct 2026): the "Includes" sentences repeat themselves -- the
-# Radiance Showdown Deck page says "two booster packs" in one sentence and
-# "2 Riftbound: Radiance boosters" / "2 Radiance booster packs for
-# customization" in two more. Each sentence is split into single items, the
-# "for customization" / "to power your decks" tails are dropped, and only the
-# FIRST item of each kind (booster, playmat, deck box, rulebook...) is kept.
-_NUM_WORDS_RE = r"(?:\d+|two|three|four|five|six|a|an|one)"
-_ITEM_SPLIT_RE = re.compile(
-    rf",\s+(?={_NUM_WORDS_RE}\b)"              # ", 36 basic runes"
-    rf"|,?\s+and\s+(?={_NUM_WORDS_RE}\b)"      # " and 2 durable deck boxes"
-    r"|,\s+and\s+(?=(?-i:[a-z]))",            # ", and deck-building tips" (not ", and Garen")
-    re.IGNORECASE)
-_PURPOSE_TAIL_RE = re.compile(
-    r"\s+(?:designed\s+)?(?:for (?:customization|keeping|balanced)|to help|to power|to keep|making it)\b.*$",
-    re.IGNORECASE)
-_ITEM_KINDS = [
-    ("deck box", r"\bdeck ?box(?:es)?\b"), ("playmat", r"\bplaymats?\b"), ("booster", r"\bboosters?\b"),
-    ("rulebook", r"\brulebooks?\b"), ("sleeves", r"\bsleeves?\b"), ("runes", r"\brunes?\b"),
-    ("tokens", r"\btokens?\b"), ("dividers", r"\bdividers?\b"), ("deck", r"\bdecks?\b(?!-)"),
-]
-
-
-def _split_items(item):
-    out = []
-    for part in _ITEM_SPLIT_RE.split(item):
-        part = _PURPOSE_TAIL_RE.sub("", part).strip(" ,;.")
-        if not part:
-            continue
-        first, _, rest = part.partition(" ")
-        if first.lower() in _WORD_NUM and rest:
-            part = f"{_WORD_NUM[first.lower()]} {rest}"
-        out.append(part)
-    return out
-
-
-def _dedupe_items(items, have_decks=False):
-    seen, out = ({"deck"} if have_decks else set()), []
-    for it in items:
-        kind = next((k for k, rx in _ITEM_KINDS if re.search(rx, it, re.IGNORECASE)), it.lower())
-        if kind in seen:
-            continue
-        seen.add(kind)
-        out.append(it)
-    return out
-
-
 def extract_contents(description):
     if not description:
         return []
-    lined, disclaimer = strip_disclaimer(description)
-    text = re.sub(r"\s+", " ", lined)
-    disclaimer = re.sub(r"\s+", " ", disclaimer) if disclaimer else disclaimer
+    text, disclaimer = strip_disclaimer(description)
     lines = []
 
     # --- booster sets ---
@@ -463,18 +415,6 @@ def extract_contents(description):
         n = _WORD_NUM.get(deck.group(1).lower(), deck.group(1))
         lines.append(f"Decks: {n} × {deck.group(2)}-card preconstructed deck")
 
-    # --- Champion Legend sets (Arcane Box Set, confirmed 12 Oct 2026):
-    # "only contains six individual Champion Legend cards ... foil treatments
-    # of Jinx, Vi, Heimerdinger, Caitlyn, Viktor and Warwick"
-    legends = re.search(r"contains (\w+) (?:individual )?Champion Legend cards", text, re.IGNORECASE)
-    if legends:
-        n = _WORD_NUM.get(legends.group(1).lower(), legends.group(1))
-        who = re.search(r"(foil)?(?: treatments)? of ((?:[A-Z][\w']+(?:, | and ))+[A-Z][\w']+)", text)
-        names = ""
-        if who:
-            names = f" ({'foil: ' if who.group(1) else ''}{re.sub(r' and ', ', ', who.group(2))})"
-        lines.append(f"Champion Legend cards: {n}{names}")
-
     # --- "what's in the box" sentences ---
     included = []
     for sent in _sentences(text):
@@ -485,13 +425,12 @@ def extract_contents(description):
         item = m.group(1).strip().rstrip(".!")
         # "3 rares with a clear path to competitive upgrades—perfect for ..."
         item = re.split(r"\s*(?:—| - )\s*", item)[0].strip()
-        if len(item) > 220:
+        if len(item) > 220 or item.lower() in (x.lower() for x in included):
             continue
-        included.extend(_split_items(item))
-    feats = re.search(r"Features:\s*(.+?)(?=\s+Approximate Dimensions|\s+Please note|$)", lined, re.DOTALL)
+        included.append(item)
+    feats = re.search(r"Features:\s*(.+?)(?=\s+Approximate Dimensions|\s+Please note|$)", text)
     if feats:
-        included.extend(x.strip() for x in re.split(r"\n|\s(?=\d+x\s)", feats.group(1)) if x.strip())
-    included = _dedupe_items(included, have_decks=bool(deck))
+        included.append("; ".join(x.strip() for x in re.split(r"\s(?=\d+x\s)", feats.group(1)) if x.strip()))
     if included:
         lines.append("Includes: " + "; ".join(included))
 
@@ -520,64 +459,41 @@ def extract_contents(description):
     return lines
 
 
-# ---------------------------------------------------------------------------
-# Real release dates (NEW, 12 Oct 2026)
-#
-# The store has no release-date field and its _createdAt listing date is
-# wrong for most items (e.g. Origins listed 4 Aug 2025 but released 31 Oct
-# 2025; the Arcane Box Set shows 2 Sep 2026 but went on pre-order 2 Sep
-# 2025). Real dates were looked up per set and are matched on title words.
-# Retail sets use the English street date from UVS Games' "Dates and Details"
-# sell sheets / Riot press releases. Riot-store exclusives (bundles, Arcane,
-# T1) never had a street date, so the date they went ON SALE is used and
-# the note says when they shipped. First match wins -- keep specific rules
-# (e.g. "Proving Grounds") above set-wide ones.
-# ---------------------------------------------------------------------------
-_RELEASE_DATES = [
-    # (title words that must ALL appear, date, note, source)
-    (["proving grounds"], "2025-10-31",
-     "Original Proving Grounds (Annie/Master Yi/Lux/Garen) released with Origins. The store's $39.99 price is the reprint "
-     "(MSRP raised from $29.99); no reprint date has been announced.",
-     "https://riftboundguide.com/2026/02/28/riftbound-proving-grounds-reprint/"),
-    (["arcane box set"], "2025-09-02",
-     "Riot-store pre-order opened 2 Sep 2025; production was delayed and shipping started mid-Feb 2026 (no exact day published).",
-     "https://playriftbound.com/en-us/news/announcements/how-to-preorder-the-riftbound-lol-arcane-box-set/"),
-    (["worlds bundle 2025"], "2025-10-28",
-     "On sale on the Riot store 28 Oct 2025, 9AM PT; orders expected to ship mid-December 2025.",
-     "https://playriftbound.com/en-us/news/announcements/how-to-buy-riftbound-worlds-bundle-2025-and-origins-restock-news/"),
-    (["lunar revel"], "2026-02-17",
-     "On sale on Riot's store 17 Feb 2026.",
-     "https://www.sheepesports.com/articles/riftbound-all-collector-bundles-and-promotional-cards/en"),
-    (["t1", "signature edition"], "2026-08-20",
-     "Sold by draw on the Riot store: entries 14-17 Aug 2026, purchase emails from 20 Aug 2026, shipping from 2 Sep 2026.",
-     "https://riftbound.gg/riftbound-t1-bundle-draw-schedule/"),
-    # The 4 Unleashed playmats + 4 art sleeves don't say "Unleashed" in their
-    # titles; their page text does ("official Riftbound: Unleashed sleeves"),
-    # and the Asmodee distributor listing gives "May 8 2026".
-    *[([champ], "2026-05-08", "Unleashed accessory (playmat / art sleeves) -- released with the set.",
-       "https://uvsgames.com/wp-content/uploads/2026/01/Unleashed-Dates-and-Details.pdf")
-      for champ in ("poppy, keeper of the hammer", "leblanc, deceiver", "master yi, wuju master", "vi, piltover enforcer")],
-    (["origins"], "2025-10-31", "English release of Origins (Set 1).",
-     "https://pressreleases.triplepointpr.com/2025/10/31/riftbound-league-of-legends-trading-card-game-first-set-origins-now-available/"),
-    (["spiritforged"], "2026-02-13", "English release of Spiritforged (Set 2).",
-     "https://uvsgames.com/wp-content/uploads/2025/11/Spiritforged-Dates-and-Details.pdf"),
-    (["unleashed"], "2026-05-08", "English release of Unleashed (Set 3); playmats and art sleeves release with the set.",
-     "https://uvsgames.com/wp-content/uploads/2026/01/Unleashed-Dates-and-Details.pdf"),
-    (["vendetta"], "2026-07-31", "English release of Vendetta (Set 4).",
-     "https://articles.starcitygames.com/news/riftbound-2026-set-release-schedule/"),
-    (["radiance"], "2026-10-23", "English release of Radiance (Set 5) -- UPCOMING, not out yet.",
-     "https://uvsgames.com/wp-content/uploads/2026/07/Radiance-Dates-and-Details.pdf"),
+# Set release dates (English, worldwide), researched 16 Nov 2026.
+_WIKI = "https://en.wikipedia.org/wiki/Riftbound (set table)"
+_SET_DATES = [
+    ("proving grounds", "2025-10-31", "https://runeweave.com/sets ('Proving Grounds ... Released October 31, 2025', released with Origins)"),
+    ("origins", "2025-10-31", _WIKI),
+    ("spiritforged", "2026-02-13", "UVS Games, Spiritforged Dates and Details (https://uvsgames.com/wp-content/uploads/2025/11/Spiritforged-Dates-and-Details.pdf)"),
+    ("unleashed", "2026-05-08", _WIKI),
+    ("vendetta", "2026-07-31", _WIKI),
+    ("radiance", "2026-10-23", _WIKI),
+    ("legacy", "2027-01-29", _WIKI),
+    ("the reckoning", "2027-04-30", _WIKI),
 ]
+# Champion / showdown decks named by champion only: champion -> set
+# (Origins: Jinx, Viktor, Lee Sin; Spiritforged: Rumble, Fiora; Unleashed: Vi,
+# Vex; Vendetta: Zed vs Shen showdown deck).
+_DECK_SETS = [("zed", "vendetta"), ("shen", "vendetta"), ("lee sin", "origins"), ("jinx", "origins"),
+              ("viktor", "origins"), ("rumble", "spiritforged"), ("fiora", "spiritforged"),
+              ("vex", "unleashed"), ("vi", "unleashed")]
+# Product types that are sold as part of a set's release
+_SET_RELEASE_CATEGORIES = {"Booster Display", "Booster Pack", "Showdown Deck", "Champion Deck",
+                           "Starter Deck", "Vault", "Proving Grounds", "Box Set", "Deck"}
 
 
-def lookup_release_date(title):
-    """Returns (date, note, source) or (None, None, None) for a product not in
-    the table -- a NEW product the table doesn't know yet, which needs adding."""
+def release_for(title, category, listed):
+    """-> (YYYY-MM-DD or None, note)"""
     low = (title or "").lower()
-    for words, date, note, source in _RELEASE_DATES:
-        if all(w in low for w in words):
-            return date, note, source
-    return None, None, None
+    listed_note = f"store listing date {listed[:10]} is not a release date" if listed else "no store listing date"
+    if category in _SET_RELEASE_CATEGORIES and "arcane" not in low:
+        set_name = next((n for n, _, _ in _SET_DATES if re.search(r"\b" + re.escape(n) + r"\b", low)), None)
+        if not set_name and category in ("Champion Deck", "Showdown Deck"):
+            set_name = next((st for champ, st in _DECK_SETS if re.search(r"\b" + re.escape(champ) + r"\b", low)), None)
+        if set_name:
+            d, src = next((d, src) for n, d, src in _SET_DATES if n == set_name)
+            return d, f"{set_name.title()} set release date (source: {src}); {listed_note}"
+    return None, f"no published exact release date for this product; {listed_note}"
 
 
 def get_all_riftbound_products():
@@ -598,20 +514,29 @@ def get_all_riftbound_products():
     }
 
     _ALL_TITLES[:] = [v.get("title") or "" for v in physical_items.values()]
-    products = []
+    today = date.today().isoformat()
+    products, skipped = [], []
     for sku, item in physical_items.items():
         slug = item.get("slug")
+        category = classify_category(item.get("title"))
+        rel, how = release_for(item.get("title"), category, item.get("_createdAt"))
+        if rel and rel > today:
+            skipped.append((item.get("title"), f"releases {rel}"))
+            continue
         products.append({
             "sku": sku,
             "title": item.get("title"),
-            "category": classify_category(item.get("title")),
+            "category": category,
+            "release_date": rel,
+            "release_how": how,
             "price": item.get("price"),
             "listed_date": item.get("_createdAt"),  # site listing date, NOT a confirmed retail release date -- see module docstring
-            "release_date": lookup_release_date(item.get("title"))[0],
             "image_url": (item.get("main_image") or {}).get("src"),
             "slug": slug,
             "source_url": f"https://merch.riotgames.com/en-us/product/{slug}/" if slug else None,
         })
+    products.sort(key=lambda p: (p["release_date"] or "9999", p["title"] or ""))
+    get_all_riftbound_products.skipped = skipped
     return products
 
 
@@ -662,24 +587,13 @@ def build_record(product):
         game="Riftbound",
         title=product["title"],
         sku=product["sku"],
-        # Real release date from _RELEASE_DATES; None if the product isn't in
-        # that table yet (it's then listed at the end of a full run).
-        release_date=product.get("release_date"),
+        release_date=product.get("release_date"),  # set release date, see release_for()
         image_url=product.get("image_url"),
         contents=contents,
         pack_configuration=[],
         price=product.get("price"),
         source_url=product.get("source_url"),
     )
-
-
-def print_release_note(product):
-    _, note, source = lookup_release_date(product["title"])
-    if note:
-        print(f"Release note: {note}")
-        print(f"Release source: {source}")
-    else:
-        print(f"Release note: NOT IN DATE TABLE -- store listing date is {product.get('listed_date')}; add it to _RELEASE_DATES")
 
 
 def discover_all():
@@ -692,8 +606,17 @@ def discover_all():
     for p in products:
         record = build_record(p)
         print_product_record(record)
-        print_release_note(p)
+        print(f"Release note: {p['release_how']}")
         records.append(record)
+
+    skipped = getattr(get_all_riftbound_products, "skipped", [])
+    print(f"\n{len(skipped)} item(s) skipped as not released yet:")
+    for n, why in skipped:
+        print(f"  - {n}: {why}")
+    no_date = [p for p in products if not p["release_date"]]
+    print(f"\n{len(no_date)} product(s) with no exact release date:")
+    for p in no_date:
+        print(f"  - [{p['category']}] {p['title']}")
 
     unsure = [p for p in products if p.get("_description") and not p["_desc_mentions_product"]
               and _title_words(p["title"])]
@@ -709,10 +632,7 @@ def discover_all():
     print(f"\n{len(no_desc)} product(s) with no description found on the page:")
     for p in no_desc:
         print(f"  - {p['title']}  {p['source_url']}")
-    no_date = [p for p in products if not p.get("release_date")]
-    print(f"\n{len(no_date)} product(s) with no real release date (not in _RELEASE_DATES yet -- new products):")
-    for p in no_date:
-        print(f"  - {p['title']}  (store listing date {p['listed_date']})")
+    print("\nNOTE: release dates are set release dates (see _SET_DATES); the store's listing date is not used.")
     return records
 
 
@@ -730,12 +650,11 @@ def discover(search_term):
 
     record = build_record(match)
     print_product_record(record)
-    print_release_note(match)
+    print(f"Release note: {match['release_how']}")
     if _DEBUG:
         print("\n[DEBUG] description candidates on the page (about-this-product, score, length) -- first wins:")
         for (score, about), length, text in match["_desc_scored"]:
-            print(f"  about={str(about):<5} score {score:>3}  len {length}:")
-            print(f"      {strip_disclaimer(text)[0]}")
+            print(f"  about={str(about):<5} score {score:>3}  len {length}: {text[:160]}...")
         print("\n[DEBUG] chosen description, disclaimer removed:")
         print(strip_disclaimer(match["_description"] or "")[0])
     return record

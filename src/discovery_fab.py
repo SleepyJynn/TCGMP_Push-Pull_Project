@@ -60,20 +60,26 @@ ran (inspect_fab_catalog.py / inspect_fab_catalog2.py):
     decks are sometimes genuine no-barcode promotional giveaways, so it's
     flagged in the debug listing for a human check instead of excluded.
 
+UPDATED 16 Nov 2026 (same rules as the other games):
+  - contents = the labelled fields from extract_contents() (cards in set,
+    set composition, configuration, rarity distribution) instead of the
+    whole page text
+  - release date = an exact date from the page's "Release date" / "In
+    Stores" text, as YYYY-MM-DD; text without an exact day (e.g. "Europe --
+    October 2021") gives no date. The site's publish date is NOT used as a
+    release date any more (shown in the notes only)
+  - image = the post's featured image, or the page's og:image, when the
+    site provides one
+  - products releasing after today are skipped
+
 Usage:
+    python src/discovery_fab.py all --out=fab_output.txt
     python src/discovery_fab.py                  (prompts for a product name; leave blank to pull all)
     python src/discovery_fab.py "Outsiders"       (search within all products, no prompt)
-    python src/discovery_fab.py all --out=fab_output.txt   (pull everything into a UTF-8 file)
-    python src/discovery_fab.py 79660 --debug --out=dbg.txt (one product by its id, with debug)
 """
 
-import html as html_lib
-import re
 import sys
 
-# Same --out=<file> option as the Digimon script: writes the output as UTF-8
-# to a file (and still prints it), so long runs don't get cut off by the
-# terminal. e.g.  python src/discovery_fab.py --out=fab_output.txt
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 if any(a.startswith("--out=") for a in sys.argv):
     _out_arg = next(a for a in sys.argv if a.startswith("--out="))
@@ -91,13 +97,9 @@ if any(a.startswith("--out=") for a in sys.argv):
 
     sys.stdout = _Tee()
 
-# --debug: with a single-product search, also prints every image candidate
-# with its score and the full page text, e.g.
-#   python src/discovery_fab.py "Silver Age" --debug --out=fab_debug.txt
-_DEBUG = "--debug" in sys.argv
-if _DEBUG:
-    sys.argv.remove("--debug")
-
+import html as html_lib
+import re
+from datetime import date
 import requests
 from common import make_product_record, print_product_record
 
@@ -215,115 +217,6 @@ def fetch_product_type_terms():
     return {t["id"]: t["name"] for t in resp.json()}
 
 
-# ---------------------------------------------------------------------------
-# Image -- REWRITTEN (9 Oct 2026, after the first live run)
-#
-# The first version took the first image it found (featured image, then the
-# Yoast preview image, then the first <img> in the content). The live run
-# showed that on several newer pages that picks a page background or a
-# cross-promo picture of a DIFFERENT product:
-#   Armory Deck – Dr. Mortimer      -> ad_azalea_texture_1...webp
-#   Mastery Pack Assassin           -> dr-mortimer-cover-scaled.webp
-#   Smash Palace (2026)             -> AD_Olympia_Banner_Background.webp
-#   Silver Age – Usurp the Shadow Throne -> AD-Malice-Banner-Background...jpg
-# Now every candidate from all three sources is collected and scored on its
-# FILE NAME:
-#   + product-name words in the filename ("mortimer", "assassin", "usurp")
-#   + package-shot words (mockup, productshot, dropshadow, booster, display...)
-#   - background/banner/texture/cover/logo/masthead words
-#   - another product's name, when the filename names a known product and
-#     not this one
-# The winner's source and filename are kept, and a full run lists every
-# product whose chosen image doesn't mention the product's name, so a human
-# can eyeball those few. No image is ever invented.
-# ---------------------------------------------------------------------------
-_CONTENT_IMG_RE = re.compile(r'<img[^>]+src="([^"]+)"', re.IGNORECASE)
-_GOOD_IMG_WORDS = ("mockup", "mock_", "productshot", "product_shot", "dropshadow", "booster", "display",
-                   "box", "pack", "deck", "collection", "packaging", "product")
-_BAD_IMG_WORDS = ("texture", "background", "banner", "_bg", "-bg", "bg-", "cover", "logo", "masthead",
-                  "art_sig", "paper_", "icon", "avatar", "header", "chapter-bg")
-# Words that appear in many product names and say nothing about WHICH product.
-_GENERIC_TITLE_WORDS = {"armory", "deck", "decks", "pack", "packs", "mastery", "booster", "blitz",
-                        "collection", "origins", "the", "and", "of", "first", "edition", "unlimited",
-                        "set", "silver", "age", "black", "label", "demo", "welcome", "card", "cards"}
-
-
-def _title_tokens(title):
-    """Name words that identify THIS product in an image filename. fabtcg's
-    filenames often abbreviate, so besides the full words this also adds
-    the first 3 letters of each word ("monarch" -> "mon", "uprising" ->
-    "upr") and the title's initials ("Tales of Aria" -> "toa", "Dusk till
-    Dawn" -> "dtd", "Welcome to Rathe" -> "wtr")."""
-    words = re.findall(r"[a-z0-9]+", html_lib.unescape(title).lower())
-    full = {w for w in words if len(w) >= 4 and w not in _GENERIC_TITLE_WORDS}
-    tokens = set(full) | {w[:3] for w in full}
-    # Initials of every leading run of words, so "Tales of Aria Unlimited"
-    # still yields "toa" and "History Pack 1" yields "hp1".
-    for k in range(2, len(words) + 1):
-        tokens.add("".join(w[0] for w in words[:k]))
-    tokens |= {w for w in words if len(w) == 3 and w not in _GENERIC_TITLE_WORDS}  # "Ira"
-    return tokens
-
-
-def _image_candidates(item, content_html):
-    out = []
-    for media in (item.get("_embedded") or {}).get("wp:featuredmedia") or []:
-        if isinstance(media, dict) and media.get("source_url"):
-            out.append(("featured", media["source_url"]))
-    for og in (item.get("yoast_head_json") or {}).get("og_image") or []:
-        if isinstance(og, dict) and og.get("url"):
-            out.append(("preview", og["url"]))
-    for src in _CONTENT_IMG_RE.findall(content_html or ""):
-        out.append(("page", html_lib.unescape(src)))
-    seen, unique = set(), []
-    for source, url in out:
-        if url not in seen:
-            seen.add(url)
-            unique.append((source, url))
-    return unique
-
-
-def _score_image(url, source, own_tokens, other_tokens):
-    name = url.rsplit("/", 1)[-1].lower()
-    name_words = set(re.findall(r"[a-z0-9]+", name))
-    score = 0
-    # Short tokens (abbreviations) must match a whole filename word, so
-    # "out" doesn't match inside "layout"; long ones may match inside one.
-    mentions_self = any(t in name_words if len(t) <= 3 else t in name for t in own_tokens)
-    if mentions_self:
-        score += 10
-    elif {t for t in other_tokens if len(t) >= 4} & name_words:
-        score -= 8  # names a different product
-    score += 3 * sum(w in name for w in _GOOD_IMG_WORDS if w != "product")
-    score -= 6 * sum(w in name for w in _BAD_IMG_WORDS)
-    score += {"featured": 2, "preview": 1, "page": 0}[source]
-    return score, mentions_self
-
-
-_SET_CODE_RE = re.compile(r"Set code:\s*([A-Z0-9]{2,5})\b")
-
-
-def choose_image(item, content_html, title, other_tokens):
-    """Returns (url, source, mentions_product_name, all_candidates)."""
-    candidates = _image_candidates(item, content_html)
-    if not candidates:
-        return None, None, False, []
-    own = _title_tokens(title)
-    # fabtcg file names often use the set code instead of the name
-    # ("hnt_booster_dropshadow" = The Hunted, "en_evo_mock_boosterbox" =
-    # Bright Lights), so the page's own "Set code: XXX" counts as a name.
-    code = _SET_CODE_RE.search(html_lib.unescape(re.sub(r"<[^>]+>", " ", content_html or "")))
-    if code:
-        own = own | {code.group(1).lower()}
-    scored = []
-    for order, (source, url) in enumerate(candidates):
-        score, mentions = _score_image(url, source, own, other_tokens - own)
-        scored.append((score, -order, source, url, mentions))
-    scored.sort(reverse=True)
-    best = scored[0]
-    return best[3], best[2], best[4], [(s, src, u) for s, _, src, u, _ in scored]
-
-
 _URL_CAT_RE = re.compile(r"/products/([^/]+)/")
 
 
@@ -338,9 +231,7 @@ def get_all_products():
     all_items = []
     page = 1
     while True:
-        # _embed asks WordPress to inline each product's featured image
-        # record, so no extra request per product is needed for images.
-        resp = session.get(PRODUCT_URL, params={"per_page": 100, "page": page, "_embed": "wp:featuredmedia"}, timeout=20)
+        resp = session.get(PRODUCT_URL, params={"per_page": 100, "page": page, "_embed": "wp:featuredmedia"}, timeout=30)
         resp.raise_for_status()
         batch = resp.json()
         if not batch:
@@ -351,97 +242,77 @@ def get_all_products():
             break
         page += 1
 
-    kept = []
+    today = date.today().isoformat()
+    products, skipped = [], []
     for item in all_items:
         title = html_lib.unescape(item.get("title", {}).get("rendered", ""))
         content_html = item.get("content", {}).get("rendered", "")
-        if not _is_junk_product(title, content_html):
-            kept.append((item, title, content_html))
-    # Name words of every listed product -- used to spot an image that
-    # belongs to a DIFFERENT product (see choose_image).
-    all_tokens = set()
-    for _, title, _ in kept:
-        all_tokens |= _title_tokens(title)
-
-    products = []
-    for item, title, content_html in kept:
+        if _is_junk_product(title, content_html):
+            continue
 
         link = item.get("link", "")
         m = _URL_CAT_RE.search(link)
         url_cat = m.group(1) if m else None
         ptype_names = [term_map.get(pid) for pid in item.get("product_type", []) if pid in term_map]
 
+        listed = (item.get("date") or "")[:10]  # site publish date, NOT a release date
+        rel, how = parse_release(content_html, listed)
+        if rel and rel > today:
+            skipped.append((title, f"releases {rel}"))
+            continue
+        image, image_how = product_image(item)
         products.append({
             "id": item.get("id"),
             "title": title,
             "category": classify_category(title, ptype_names, url_cat, content_html),
-            "listed_date": (item.get("date") or "")[:10],  # site publish date, NOT a confirmed retail release date -- see module docstring
+            "listed_date": listed,
+            "release_date": rel,
+            "release_how": how,
+            "image": image,
+            "image_how": image_how,
+            "contents": extract_contents(content_html),
             "content_html": content_html,
             "source_url": link,
-            **dict(zip(("image_url", "image_source", "image_mentions_product", "image_candidates"),
-                       choose_image(item, content_html, title, all_tokens))),
-            "has_page_date": extract_release_date(content_html) is not None,
             "needs_human_check": title.strip().lower() in _NO_COMMERCE_EXCEPTIONS,
         })
-    return _split_chapter_pages(products)
+    get_all_products.skipped = skipped
+    return products
 
 
-# ---------------------------------------------------------------------------
-# Chapter hub pages (NEW, 12 Oct 2026)
-#
-# Confirmed via --debug on ids 72075 / 73401 / 79660 / 82561: the four
-# "Silver Age" / "Silver Age – Chapter 3" WP entries are NOT four products.
-# They are copies of one format hub page, published as it grew, each holding
-# a block per real product:
-#     PRODUCT DETAILS – CHAPTER 1 Release Date: ... SKU: FAB2602 Product Configuration: ...
-#     PRODUCT DETAILS – CHAPTER 2 Release Date: ... SKU: FAB2603 ...
-#     PRODUCT DETAILS – CHAPTER 3 Release Date: June 5 2026 ... SKU: FAB2608 ...
-# (72075 writes the header as "Product Overview CHAPTER 1 Release Date: ...")
-# Parsed as one page, Chapter 1's configuration ran into Chapter 2's and was
-# dropped for length. Such a page is now split into one product per chapter
-# block, named "<page title base> – Chapter N", and a chapter already taken
-# from a newer copy of the page isn't added again. A page with no chapter
-# blocks -- e.g. "Silver Age – Usurp the Shadow Throne" -- is left as-is.
-# ---------------------------------------------------------------------------
-_CHAPTER_BLOCK_RE = re.compile(r"(?:PRODUCT DETAILS\s*[–-]\s*)?CHAPTER\s+(\d+)\s+(?=Release Date)", re.IGNORECASE)
-_FAB_SKU_RE = re.compile(r"\bSKU:\s*(FAB\d+(?:-[A-Z]{2})?)")
+_MONTHS = ["january", "february", "march", "april", "may", "june", "july",
+           "august", "september", "october", "november", "december"]
+_EXACT_DATE_RE = re.compile(
+    r"\b(" + "|".join(_MONTHS) + r")\.?\s+(\d{1,2})(?:st|nd|rd|th)?"
+    r"(?:\s*[-\u2013]\s*\d{1,2}(?:st|nd|rd|th)?)?,?\s+(\d{4})", re.IGNORECASE)
 
 
-def _split_chapter_pages(products):
-    out, seen_titles = [], set()
-    for p in products:
-        text = html_lib.unescape(re.sub(r"<[^>]+>", " ", p["content_html"]))
-        text = re.sub(r"\s+", " ", text)
-        starts = list(_CHAPTER_BLOCK_RE.finditer(text))
-        if not starts:
-            out.append(p)
-            continue
-        base = re.split(r"\s+[–-]\s+", p["title"])[0].strip()  # "Silver Age – Chapter 3" -> "Silver Age"
-        for i, m in enumerate(starts):
-            n = m.group(1)
-            title = f"{base} – Chapter {n}"
-            if title.lower() in seen_titles:
-                continue
-            seen_titles.add(title.lower())
-            block = text[m.end():starts[i + 1].start() if i + 1 < len(starts) else len(text)]
-            sku = _FAB_SKU_RE.search(block)
-            # Image: only one whose filename names this chapter ("..._ch1_...",
-            # "..._ch2_..."); the page's other images are hero deck boxes and
-            # backgrounds, so no chapter image -> no image rather than a wrong one.
-            ch_img = next((u for _, _, u in p["image_candidates"]
-                           if re.search(r"(?:^|[_\-])ch" + n + r"(?:[_\-.]|$)", u.rsplit("/", 1)[-1].lower())), None)
-            out.append({
-                **p,
-                "title": title,
-                "id": sku.group(1) if sku else f"{p['id']}-ch{n}",
-                "content_html": block,
-                "image_url": ch_img,
-                "image_source": "page" if ch_img else None,
-                "image_mentions_product": bool(ch_img),
-                "has_page_date": extract_release_date(block) is not None,
-                "needs_human_check": False,
-            })
-    return out
+def parse_release(content_html, listed_date):
+    """-> (YYYY-MM-DD or None, note). Only an exact day counts as a release
+    date; the first one in the page's release-date text is used (for a date
+    range like "July 24-27, 2025", its first day)."""
+    raw = extract_release_date(content_html)
+    if not raw:
+        return None, f"no release date on the product page (site publish date {listed_date or '?'} is not a release date)"
+    found = []
+    for m in _EXACT_DATE_RE.finditer(raw):
+        try:
+            found.append(date(int(m.group(3)), _MONTHS.index(m.group(1).lower()) + 1, int(m.group(2))).isoformat())
+        except ValueError:
+            pass
+    if not found:
+        return None, f'no exact date on the product page: "{raw}"'
+    return found[0], f'product page: "{raw}"' + (" (first date given)" if len(found) > 1 else "")
+
+
+def product_image(item):
+    """Featured image (via _embed), else the page's og:image, else None."""
+    media = ((item.get("_embedded") or {}).get("wp:featuredmedia") or [])
+    if media and isinstance(media[0], dict) and str(media[0].get("source_url") or "").startswith("http"):
+        return media[0]["source_url"], "featured image"
+    og = ((item.get("yoast_head_json") or {}).get("og_image") or [])
+    if og and isinstance(og[0], dict) and str(og[0].get("url") or "").startswith("http"):
+        return og[0]["url"], "page og:image"
+    return None, "no image on the site"
 
 
 def _first_overview_block(text):
@@ -475,19 +346,6 @@ def extract_release_date(content_html):
         text, re.IGNORECASE,
     )
     if m and re.search(r"\d{4}", m.group(1)) and len(m.group(1)) <= 200:
-        date = m.group(1).strip().rstrip(".,")
-        # An unclosed bracket means the note was cut by a stop label
-        # ("October 18, 2024 (Early access events at Spiel Essen from
-        # October 3-6") -- the half-note is dropped.
-        if date.count("(") > date.count(")"):
-            date = date[:date.rfind("(")].strip()
-        return date
-    # History Pack 1 Blitz Decks (debug, 12 Oct 2026): "Key Dates: European
-    # territories release date February 24, 2023 Rest of world release date
-    # April 7, 2023 Product Details ..." -- no colon after "release date".
-    m = re.search(r"Key Dates\s*:?\s*(.*?)(?=\s*(?:Product Details|Product type|Set code|Cards in set|MSRP|Barcodes|$))",
-                  text, re.IGNORECASE)
-    if m and re.search(r"\d{4}", m.group(1)) and len(m.group(1)) <= 200:
         return m.group(1).strip().rstrip(".,")
     m = re.search(r"In Stores\s*([A-Za-z]+ \d{1,2}(?:st|nd|rd|th)?,?\s*\d{4})", text, re.IGNORECASE)
     if m:
@@ -515,73 +373,29 @@ def extract_release_date(content_html):
 # ---------------------------------------------------------------------------
 _FIELD_LABEL_RE = re.compile(
     r"(?:\b(?:EN|JP)\s+)?"
-    # "Cards in set" must have its colon: "265 cards in set" also appears
-    # INSIDE Product Configuration values and must not start a new field.
-    r"(?P<label>[Cc]ards in set:|Set Composition|Rarity Distribution|Set contains|"
-    r"(?:[Ss]et|SET|Product|Pack|Box set)\s+Configuration|"
-    # History Pack 1 Blitz Decks (debug, 12 Oct 2026) has no Configuration
-    # label -- its contents sit under "Product Details".
-    r"Product Details)\s*:?"
+    r"(?P<label>Cards in set|Set Composition|Rarity Distribution|Set contains|"
+    r"(?:Set|Product|Pack|Box set|SET)\s+Configuration)\s*:?",
+    re.IGNORECASE,
 )
 # Text that ends a field's value. Anything after these is page furniture.
 _FIELD_STOP_RE = re.compile(
-    r"\s*(?:\bStated card drop|\bNo specific card|(?i:\bResources\b)|\bCredits\b|\bMarketing Assets\b|"
+    r"\s*(?:\bStated card drop|\bNo specific card|\bResources\b|\bCredits\b|\bMarketing Assets\b|"
     r"\bProduct Sheet\b|\bHow to Play\b|\bArmory Deck Reveal\b|\bUpgrade Your Deck\b|\bBooster Packs\b|"
-    r"\bFind an Armory\b|\bLearn to Play\b|\bMSRP\b|\bBarcodes:|\bSKU:|\bDesigned (?:for|as|to)\b|\bDue to\b|"
-    # Faith & Torment (debug, 12 Oct 2026): an event list follows the card
-    # list -- "Where to Find It PAX Australia — October 9-11 ...". It pushed
-    # the line past the length guard, so contents came back empty.
-    r"\bWhere to Find It\b|"
+    r"\bFind an Armory\b|\bLearn to Play\b|\bMSRP\b|\bBarcodes:|\bSKU:|\bDesigned for\b|\bDue to\b|"
     r"\bDeck List\b|\bPlease note\b|\bAvailable (?:free|languages)\b|\bUPP\b|\bMAP\b|\bLocal Play\b|"
-    r"\bPreview Season\b|\bSpoilers\b|\bRelease Notes\b|\bOverview\b|\*Due|\*[A-Z]|"
-    # Crucible of War 1st Ed: a buy-a-box promo paragraph follows the pack
-    # configuration with no label in between.
-    r"\bBuy-a-box\b)",
+    r"\bPreview Season\b|\bSpoilers\b|\bRelease Notes\b|\bOverview\b|\*Due|\*[A-Z])",
 )
-# Rarity names seen across all 44 listed products. A capitalised single
-# word is also accepted when it is clearly a list item (followed by a comma,
-# another count, or the end), so a new rarity name still parses -- but
-# trailing prose like "Cold foil serialized hand drawn artist sketch cards"
-# (Dusk till Dawn) does not get glued onto "10 Marvels".
-_RARITY_NAME = (
-    r"(?:Super\s+Rares?|Generic\s+Commons?|Class\s+Commons?|Pirate\s+Booty|Puzzle\s+Pieces?|"
-    r"Fabled|Legendary|Majestics?|Rares?|Commons?|Tokens?|Basics?|Marvels?|Equipment|Promos?|"
-    r"[A-Z][A-Za-z]+(?=\s*(?:,|\d|\?\?\?|$)))"
-)
-_RARITY_ITEM_RE = re.compile(r"(\d+|\?\?\?)\*{0,2}\s+(" + _RARITY_NAME + r")")
-# One pull-rate slot ends with "... – <n> per <unit>" (+ optional note in
-# brackets). Splitting AFTER that, rather than guessing where a slot name
-# starts, keeps two-word names like "Cold Foil" / "Expansion Slot" whole.
-_SLOT_END_RE = re.compile(
-    r"(–\s*[\d+\- ]+\s*(?:per|in)\s+(?:\d+\s+)?(?:booster\s+)?(?:packs?|displays?|cases?|boxes?)(?:\s*\([^)]*\))?)\s+(?=[A-Z])"
-)
-_WORDS_BEFORE_COUNT_OK = {"containing", "contains", "contain", "of", "with", "plus", "and", "per", "to", "being",
-                          "includes", "include", "is", "are"}  # "Each deck is 55 cards"
-# Which "... Configuration" label wins when a page has several. fabtcg's
-# Welcome to Rathe Unlimited page has a stray "set Configuration: 265 cards
-# in set ..." copied from another product above its real Pack Configuration.
-_CONFIG_PRIORITY = {"product configuration": 0, "pack configuration": 1, "box set configuration": 2,
-                    "product details": 4}
+_RARITY_ITEM_RE = re.compile(r"(\d+|\?\?\?)\*{0,2}\s+([A-Za-z][A-Za-z /]*?)(?=\s*,?\s*(?:\d|\?\?\?)|\s*[.(]|\s*$)")
+_WORDS_BEFORE_COUNT_OK = {"containing", "contains", "contain", "of", "with", "plus", "and", "per", "to", "being", "includes", "include"}
 
 
 def _clean_value(value):
     value = value.strip().lstrip(":").strip()
-    # Arcane Rising 1st Ed puts a disclaimer INSIDE the rarity list:
-    # "1 Fabled ( No specific card ... case. ) 14 Tokens ..." -- removed
-    # before stop phrases are applied so the rest of the list survives.
-    value = re.sub(r"\(\s*No specific card[^)]*\)", " ", value)
-    # Rosetta Blitz Deck Collection opens its configuration with
-    # "Designed for casual play 4 Rosetta Blitz Decks ...".
-    value = re.sub(r"^Designed for [a-z ,/]+?play\s*", "", value)
-    # Light & Shadow: "... (Rainbow Foil Marvel alternate art) Light & Shadow
-    # was available at selected conventions in 2025. Conventions"
-    value = re.sub(r"\s+[A-Z][^.;()]{0,40}?\bwas available\b.*$", "", value)
-    m = _FIELD_STOP_RE.search(value, 1)
+    m = _FIELD_STOP_RE.search(value)
     if m:
         value = value[:m.start()]
     # Drop a dangling "EN"/"JP" that belongs to the NEXT label.
     value = re.sub(r"\s+(?:EN|JP)\s*$", "", value)
-    value = re.sub(r"\s+", " ", value)
     return value.strip().rstrip(".,;:(").strip()
 
 
@@ -589,55 +403,41 @@ def _split_items(value):
     """'12 Mastery Pack Guardian booster packs 1 40-card Event Deck 6 Hero
     cards' -> '12 Mastery Pack Guardian booster packs; 1 40-card Event Deck;
     6 Hero cards'. Splits only where a new counted item starts (a number
-    right after a word or ')'), never inside "each containing 40 cards" or
-    before a "40-card" adjective."""
-    value = _SLOT_END_RE.sub(r"\1; ", value)
-    # Collector Series card lists: "Ser Boltyn, Breaker of Dawn (... art)
-    # Vynnset, Iron Maiden (... art)" -> one card per item.
-    value = re.sub(r"\)\s+(?=[A-Z])", "); ", value)
-    # Silver Age chapters: "... basic cards Each deck comes with ..."
-    value = re.sub(r"(?<=[a-z)])\s+(?=Each\s)", "; ", value)
-    # "10 cards per booster pack Common – 8 per pack" (History Pack 1)
-    value = re.sub(r"(per (?:booster )?pack)\s+(?=[A-Z])", r"\1; ", value)
-    # "8 Rainbow Foil equipment cards An illustrated mini lore booklet A
-    # quickstart playmat" (Classic Battles)
-    value = re.sub(r"(?<=[a-z])\s+(?=An? [a-z])", "; ", value)
-    # "12 decks per case 60-card Classic Constructed deck" (Armory Decks)
-    value = re.sub(r"(per (?:case|display|carton))\s+(?=\d)", r"\1; ", value)
+    right after a word or ')'), never inside "each containing 40 cards"."""
     out = []
     tokens = value.split(" ")
     for i, tok in enumerate(tokens):
         starts_item = (
             i > 0
-            and re.match(r"^\d+\*{0,2}$", tok)
+            and re.match(r"^\d+\*{0,2}(?:[-x]|$)", tok)
             and re.search(r"[A-Za-z)\]*]$", tokens[i - 1])
             and tokens[i - 1].lower().strip(",:") not in _WORDS_BEFORE_COUNT_OK
-            # "booster pack of Set 18" -- a set number, not a new item. Capital
-            # "Set" only: "265 cards in set 16 cards per pack" must still split.
-            and tokens[i - 1] != "Set"
         )
         if starts_item:
             out.append("; ")
         elif i > 0:
             out.append(" ")
         out.append(tok)
-    return re.sub(r";\s*;", ";", "".join(out))
+    return "".join(out)
 
 
 def _format_rarity_list(value):
     """'1 Fabled 6* Legendary 46 Majestic' -> '1 Fabled, 6 Legendary, 46
     Majestic'. Falls back to the cleaned text if it doesn't look like a
     count list."""
+    # Drop parenthetical notes inside the list (Arcane Rising 1st Ed has
+    # "1 Fabled ( No specific card ... case. ) 14 Tokens ...").
     value = re.sub(r"\([^)]*\)", " ", value)
-    # (no backslash inside the f-string -- that's a SyntaxError before Python 3.12)
-    items = [n + " " + " ".join(name.split()) for n, name in _RARITY_ITEM_RE.findall(value)]
+    items = [f"{n} {name.strip()}" for n, name in _RARITY_ITEM_RE.findall(value)]
     return ", ".join(items) if len(items) >= 2 else value.strip()
 
 
 def _format_distribution(value):
     """'Rainbow Foil – 1 per pack Rare or higher – 2 per pack (...)' ->
-    one slot per item, separated by '; '."""
-    return _SLOT_END_RE.sub(r"\1; ", value).strip()
+    one item per slot, separated by '; '."""
+    # Split only after the end of a slot ("... per pack", "...)"), so a slot
+    # name like "Rainbow Foil" isn't cut in two (fixed 16 Nov 2026).
+    return re.sub(r"(\b(?:packs?|displays?|cases?|box(?:es)?)\b|\))\s+(?=[A-Z][A-Za-z /]{1,40}? – )", r"\1; ", value).strip()
 
 
 def extract_contents(content_html):
@@ -650,11 +450,10 @@ def extract_contents(content_html):
 
     labels = list(_FIELD_LABEL_RE.finditer(text))
     fields = {}
-    config_candidates = []
     for i, m in enumerate(labels):
         end = labels[i + 1].start() if i + 1 < len(labels) else len(text)
         raw = text[m.end():end]
-        label = re.sub(r"\s+", " ", m.group("label").lower().rstrip(":"))
+        label = m.group("label").lower()
         value = _clean_value(raw)
         if not value:
             continue
@@ -670,24 +469,13 @@ def extract_contents(content_html):
         else:  # any "... Configuration"
             # "Set Configuration" is used for BOTH the rarity list and the
             # pack layout on older pages (Crucible of War lists it twice).
-            # A plain count list of rarities is a rarity breakdown; anything
-            # describing packs/decks is configuration.
-            looks_like_pack = re.search(
-                r"per (?:pack|display|case|deck)|booster|deck|contains|cards in set|playmat",
-                value, re.IGNORECASE,
-            )
-            if label == "product details" and re.fullmatch(r"\d+ card set", value):
-                continue  # "536 card set" (HP2 Black Label) -- already the card count
-            if label == "set configuration" and not looks_like_pack:
+            # A value that is a plain count list of rarities is a rarity
+            # breakdown; anything describing packs/decks is configuration.
+            looks_like_pack = re.search(r"per (?:pack|display|case|deck)|booster|deck|contains|cards in set|playmat", value, re.IGNORECASE)
+            if label.startswith("set") and not looks_like_pack:
                 fields.setdefault("rarity", _format_rarity_list(value))
             else:
-                prio = _CONFIG_PRIORITY.get(label, 3)
-                config_candidates.append((prio, -len(value), value))
-
-    if config_candidates:
-        # Best label first; among equals (Armory Deck: Legends lists the
-        # same label twice, the first one cut short) the fuller one wins.
-        fields["config"] = _split_items(sorted(config_candidates)[0][2])
+                fields.setdefault("config", _split_items(value))
 
     # "536 card set" (History Pack 2 Black Label) has no "Cards in set" label.
     if "cards" not in fields:
@@ -723,12 +511,6 @@ def extract_description(content_html):
 
 
 def search_products(products, search_term):
-    # A plain number searches by the product's WP id (the "SKU" in the
-    # output), so one of several same-named products ("Silver Age") can be
-    # picked without the interactive prompt.
-    by_id = [p for p in products if str(p["id"]).lower() == search_term.strip().lower()]
-    if by_id:
-        return by_id  # also matches split chapter products by SKU, e.g. "FAB2603"
     search_norm = search_term.lower()
     return [p for p in products if search_norm in p["title"].lower()]
 
@@ -753,18 +535,13 @@ def resolve_match(matches, search_term):
 
 
 def build_record(product):
-    release_date = extract_release_date(product["content_html"]) or product["listed_date"]
-    contents = extract_contents(product["content_html"])
-
     return make_product_record(
         game="Flesh and Blood",
         title=product["title"],
-        # WP post ID (NOT a merchant SKU) -- except for products split out of a
-        # chapter hub page, which use the real "FAB2602"-style SKU the page states.
-        sku=product["id"],
-        release_date=release_date,
-        image_url=product["image_url"],
-        contents=contents,
+        sku=product["id"],  # WP post ID, NOT a real merchant SKU/UPC -- none exposed by this API
+        release_date=product["release_date"],
+        image_url=product["image"],
+        contents=product["contents"],
         pack_configuration=[],
         price=None,  # no price field exposed by this API
         source_url=product["source_url"],
@@ -779,45 +556,22 @@ def discover_all():
         print(f"  - [{p['category']}] '{p['title']}'  (id {p['id']}, listed {p['listed_date']}){flag}")
 
     records = []
-    no_image, no_contents, count_mismatch = [], [], []
     for p in products:
         record = build_record(p)
         print_product_record(record)
+        print(f"Category: {p['category']} | Release note: {p['release_how']} | Image: {p['image_how']}")
         records.append(record)
-        if not p["image_url"]:
-            no_image.append(p)
-        lines = extract_contents(p["content_html"])
-        if not lines:
-            no_contents.append(p)
-        # fabtcg's own pages sometimes contradict themselves (Bright Lights
-        # says "Cards in set: 251" and "265 cards in set") -- flagged, not
-        # silently picked between.
-        counts = set(re.findall(r"(?:Cards in set: |Configuration: )(\d+)\*{0,2}(?: cards in set|$)", "\n".join(lines), re.MULTILINE))
-        if len(counts) > 1:
-            count_mismatch.append((p, sorted(counts)))
-
-    print(f"\n{len(no_image)} product(s) with no image found:")
-    for p in no_image:
-        print(f"  - {p['title']}  {p['source_url']}")
-    def _looks_off(p):
-        fname = p["image_url"].rsplit("/", 1)[-1].lower()
-        return (not p["image_mentions_product"]) or any(w in fname for w in _BAD_IMG_WORDS)
-    unsure = [p for p in products if p["image_url"] and _looks_off(p)]
-    print(f"\n{len(unsure)} product(s) whose image may be wrong -- filename doesn't name the product, "
-          f"or looks like a logo/banner/background (eyeball these):")
-    for p in unsure:
-        print(f"  - {p['title']}  -> {p['image_url'].rsplit('/', 1)[-1]}  ({p['image_source']})")
-    no_date = [p for p in products if not p["has_page_date"]]
-    print(f"\n{len(no_date)} product(s) with no release date on the page (showing the site's publish date instead):")
-    for p in no_date:
-        print(f"  - {p['title']}  (published {p['listed_date']})  {p['source_url']}")
-    print(f"\n{len(no_contents)} product(s) with no card count / configuration found:")
-    for p in no_contents:
-        print(f"  - {p['title']}  {p['source_url']}")
-    if count_mismatch:
-        print(f"\n{len(count_mismatch)} product(s) whose page states two different card counts (check by hand):")
-        for p, counts in count_mismatch:
-            print(f"  - {p['title']}: {' vs '.join(counts)}  {p['source_url']}")
+    skipped = getattr(get_all_products, "skipped", [])
+    print(f"\n{len(skipped)} item(s) skipped as not released yet:")
+    for n, why in skipped:
+        print(f"  - {n}: {why}")
+    for label, test in (("no exact release date", lambda p: not p["release_date"]),
+                        ("no image", lambda p: not p["image"]),
+                        ("no contents", lambda p: not p["contents"])):
+        bad = [p for p in products if test(p)]
+        print(f"\n{len(bad)} product(s) with {label}:")
+        for p in bad:
+            print(f"  - {p['title']}  {p['release_how'] if 'date' in label else p['source_url']}")
     return records
 
 
@@ -835,13 +589,7 @@ def discover(search_term):
 
     record = build_record(match)
     print_product_record(record)
-    if _DEBUG:
-        print("\n[DEBUG] image candidates (score, source, url) -- highest wins:")
-        for score, source, url in match["image_candidates"]:
-            print(f"  {score:>4}  {source:<8} {url}")
-        text = html_lib.unescape(re.sub(r"<[^>]+>", " ", match["content_html"]))
-        print("\n[DEBUG] page text the contents parser sees:")
-        print(re.sub(r"\s+", " ", text).strip())
+    print(f"Category: {match['category']} | Release note: {match['release_how']} | Image: {match['image_how']}")
     return record
 
 
@@ -850,11 +598,10 @@ if __name__ == "__main__":
     # the prompt entirely -- use this if you're redirecting output to a file
     # (python discovery_fab.py "" > out.txt won't work for "all", but running
     # with no args and piping blank input in will, e.g. echo. | python ...).
-    if len(sys.argv) >= 2:
-        if sys.argv[1].strip().lower() == "all":
-            discover_all()
-        else:
-            discover(sys.argv[1])
+    if len(sys.argv) >= 2 and sys.argv[1].strip().lower() == "all":
+        discover_all()
+    elif len(sys.argv) >= 2:
+        discover(sys.argv[1])
     else:
         search_term = input("Product name to search (leave blank to pull all products): ").strip().strip('"').strip("'")
         if search_term:
